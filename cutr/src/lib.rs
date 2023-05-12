@@ -1,25 +1,73 @@
 use crate::Extract::*;
 use clap::{App, Arg};
-use std::{error::Error, ops::Range};
+use csv::{ReaderBuilder, StringRecord, WriterBuilder};
 use regex::Regex;
+use std::{
+    error::Error,
+    fs::File,
+    io::{self, BufRead, BufReader},
+    num::NonZeroUsize,
+    ops::Range,
+};
 
-type Result<T> = Result<T, Box<dyn Error>>;
-type PositionList = vec<Range<usize>>;
+type MyResult<T> = Result<T, Box<dyn Error>>;
+type PositionList = Vec<Range<usize>>;
 
 #[derive(Debug)]
-
-pub #[derive(Debug)]
 enum Extract {
     Fields(PositionList),
     Bytes(PositionList),
-    Chars(PositionList)
+    Chars(PositionList),
 }
 
 #[derive(Debug)]
 pub struct Config {
     files: Vec<String>,
     delimiter: u8,
-    extract: Extract
+    extract: Extract,
+}
+
+pub fn run(config: Config) -> MyResult<()> {
+    for filename in &config.files {
+        match open(filename) {
+            Err(err) => eprintln!("{}: {}", filename, err),
+            Ok(file) => match &config.extract {
+                Fields(field_pos) => {
+                    let mut reader = ReaderBuilder::new()
+                        .delimiter(config.delimiter)
+                        .has_headers(false)
+                        .from_reader(file);
+
+                    let mut wtr = WriterBuilder::new()
+                        .delimiter(config.delimiter)
+                        .from_writer(io::stdout());
+
+                    for record in reader.records() {
+                        let record = record?;
+                        wtr.write_record(extract_fields(&record, field_pos))?;
+                    }
+                }
+                Bytes(byte_pos) => {
+                    for line in file.lines() {
+                        println!("{}", extract_bytes(&line?, byte_pos));
+                    }
+                }
+                Chars(char_pos) => {
+                    for line in file.lines() {
+                        println!("{}", extract_chars(&line?, char_pos));
+                    }
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+fn open(filename: &str) -> MyResult<Box<dyn BufRead>> {
+    match filename {
+        "-" => Ok(Box::new(BufReader::new(io::stdin()))),
+        _ => Ok(Box::new(BufReader::new(File::open(filename)?))),
+    }
 }
 
 fn parse_index(input: &str) -> Result<usize, String> {
@@ -30,7 +78,7 @@ fn parse_index(input: &str) -> Result<usize, String> {
         .unwrap_or_else(|| {
             input
                 .parse::<NonZeroUsize>()
-                .map(|n| usize::from(n) -1)
+                .map(|n| usize::from(n) - 1)
                 .map_err(|_| value_error())
         })
 }
@@ -50,7 +98,7 @@ fn parse_pos(range: &str) -> MyResult<PositionList> {
                             "First number in range ({}) \
                             must be lower than second number ({})",
                             n1 + 1,
-                            n2 +1
+                            n2 + 1
                         ));
                     }
                     Ok(n1..n2 + 1)
@@ -58,9 +106,8 @@ fn parse_pos(range: &str) -> MyResult<PositionList> {
             })
         })
         .collect::<Result<_, _>>()
-        .map_err
+        .map_err(From::from)
 }
-
 
 pub fn get_args() -> MyResult<Config> {
     let matches = App::new("cutr")
@@ -72,7 +119,7 @@ pub fn get_args() -> MyResult<Config> {
                 .value_name("FILE")
                 .help("Input file(s)")
                 .multiple(true)
-                .default_value("-")
+                .default_value("-"),
         )
         .arg(
             Arg::with_name("delimiter")
@@ -80,7 +127,7 @@ pub fn get_args() -> MyResult<Config> {
                 .short("d")
                 .long("delim")
                 .help("Field delimiter")
-                .default_value("\t")
+                .default_value("\t"),
         )
         .arg(
             Arg::with_name("bytes")
@@ -88,7 +135,7 @@ pub fn get_args() -> MyResult<Config> {
                 .short("b")
                 .long("bytes")
                 .help("Selected bytes")
-                .conflicts_with_all(&["fields", "chars"])
+                .conflicts_with_all(&["fields", "chars"]),
         )
         .arg(
             Arg::with_name("chars")
@@ -96,7 +143,7 @@ pub fn get_args() -> MyResult<Config> {
                 .short("c")
                 .long("chars")
                 .help("Selected characters")
-                .conflicts_with_all(&["fields", "bytes"])
+                .conflicts_with_all(&["fields", "bytes"]),
         )
         .arg(
             Arg::with_name("fields")
@@ -104,13 +151,13 @@ pub fn get_args() -> MyResult<Config> {
                 .short("f")
                 .long("fields")
                 .help("Selected fields")
-                .conflicts_with_all(&["chars", "bytes"])
+                .conflicts_with_all(&["chars", "bytes"]),
         )
         .get_matches();
-    
+
     let delimiter = matches.value_of("delimiter").unwrap();
     let delim_bytes = delimiter.as_bytes();
-    let delim_bytes.len() != 1 {
+    if delim_bytes.len() != 1 {
         return Err(From::from(format!(
             "--delim \"{}\" must be a single byte",
             delimiter
@@ -122,17 +169,57 @@ pub fn get_args() -> MyResult<Config> {
 
     let extract = if let Some(field_pos) = fields {
         Fields(field_pos)
-    }else if let Some(byte_pos) = bytes {
+    } else if let Some(byte_pos) = bytes {
         Bytes(byte_pos)
-    }else if let Some(char_pos) = chars {
+    } else if let Some(char_pos) = chars {
         Chars(char_pos)
     } else {
-        return Err(From:from("Must have --fields, --bytes, or --chars"));
+        return Err(From::from("Must have --fields, --bytes, or --chars"));
     };
 
     Ok(Config {
         files: matches.values_of_lossy("files").unwrap(),
         delimiter: *delim_bytes.first().unwrap(),
-        extract
+        extract,
     })
+}
+
+fn extract_chars(line: &str, char_pos: &[Range<usize>]) -> String {
+    let chars: Vec<_> = line.chars().collect();
+
+    // for range in char_pos.iter().cloned() {
+    // let mut selected: Vec<char> = vec![];
+    //     for i in range {
+    //         if let Some(val) = chars.get(i) {
+    //             selected.push(*val)
+    //         }
+    //     }
+    // }
+    // selected.iter().collect()
+
+    // ----------simplify-----------
+
+    char_pos
+        .iter()
+        .cloned()
+        .flat_map(|range| range.filter_map(|i| chars.get(i)))
+        .collect()
+}
+
+fn extract_bytes(line: &str, byte_pos: &[Range<usize>]) -> String {
+    let bytes = line.as_bytes();
+    let selected: Vec<_> = byte_pos
+        .iter()
+        .cloned()
+        .flat_map(|range| range.filter_map(|i| bytes.get(i)).copied())
+        .collect();
+    String::from_utf8_lossy(&selected).into_owned()
+}
+
+fn extract_fields<'a>(record: &'a StringRecord, field_pos: &[Range<usize>]) -> Vec<&'a str> {
+    field_pos
+        .iter()
+        .cloned()
+        .flat_map(|range| range.filter_map(|i| record.get(i)))
+        .collect()
 }
